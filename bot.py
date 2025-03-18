@@ -1,228 +1,140 @@
-import os
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+import os
 from random import randint
 from dotenv import load_dotenv
-import html
-import signal
-import sys
 
-# Load environment variables
 load_dotenv()
 
-# Configuration from environment variables
 bot_token = os.getenv('BOT_TOKEN')
 api_token = os.getenv('API_TOKEN')
-url = os.getenv('API_URL')
+url = os.getenv('URL')
 limit = int(os.getenv('LIMIT', 100))
 lang = os.getenv('LANG', 'en')
+cache_reports = {}
+html_file = os.getenv('HTML_FILE', '4622177546.html')
 
-# Validate required environment variables
-if not all([bot_token, api_token, url]):
-    raise ValueError("Missing required environment variables. Please check .env file.")
+bot = telebot.TeleBot(bot_token, parse_mode="HTML")
 
-cash_reports = {}
+static_html_data = ""
+if os.path.exists(html_file):
+    with open(html_file, "r", encoding="utf-8") as f:
+        static_html_data = f.read()
 
-# Funksioni për gjenerimin e raporteve
-def sanitize_text(text):
-    if not isinstance(text, str):
-        text = str(text)
-    return html.escape(text)
-
-def generate_report(query, query_id):
+def generate_full_report(query, query_id):
+    data = {"token": api_token, "request": query, "limit": limit, "lang": lang}
     try:
-        data = {"token": api_token, "request": query, "limit": limit, "lang": lang}
         response = requests.post(url, json=data).json()
-    except Exception as e:
-        return [f"⚠️ Request failed: {sanitize_text(e)}"]
+    except Exception:
+        return {}, 0
 
-    if "Error code" in response:
-        return [f"⚠️ Error: {sanitize_text(response['Error code'])}"]
+    leaks_found = 0
+    grouped_data = []
 
-    reports = []
-    full_report = []
-    for database_name, details in response.get("List", {}).items():
-        text = [f"{sanitize_text(database_name)}", ""]
-        text.append(sanitize_text(details.get("InfoLeak", "No additional info")) + "\n")
+    if "List" in response:
+        for db, details in response["List"].items():
+            if "Data" in details:
+                leaks_found += len(details["Data"])
+                grouped_data.append({"db": db, "info": details.get("InfoLeak", "No info"), "data": details["Data"]})
 
-        if database_name != "No results found":
-            for report_data in details.get("Data", []):
-                for column_name, value in report_data.items():
-                    line = f"{sanitize_text(column_name)}: {sanitize_text(value)}"
-                    text.append(line)
-                    full_report.append(line)
-                text.append("-"*20)
+    cache_reports[str(query_id)] = {"grouped": grouped_data, "leaks": leaks_found}
+    return grouped_data, leaks_found
 
-        formatted_text = "\n".join(text)
-        reports.append(formatted_text)
+def format_database_text(entry):
+    text = f"""🔗<b>{entry['db']}</b>\n\n{entry['info']}\n\n"""
+    for row in entry['data']:
+        for k, v in row.items():
+            if k.lower() == 'email':
+                text += f"📩Email: {v}\n"
+            elif k.lower() == 'password':
+                text += f"🔑Password: {v}\n"
+            elif k.lower() == 'link':
+                text += f"🔗Link: {v}\n"
+            elif k.lower() == 'ip':
+                text += f"🌐IP: {v}\n"
+            elif k.lower() == 'username':
+                text += f"👤Username: {v}\n"
+            elif k.lower() == 'phone' or k.lower() == 'phone2':
+                text += f"📞Phone: {v}\n"
+            else:
+                text += f"<b>{k}:</b> {v}\n"
+        text += "\n"
+    return text
 
-    if not reports:
-        reports = ["No results found"]
-
-    full_report_text = "\n".join(full_report) if full_report else "No results found"
-    cash_reports[str(query_id)] = {"pages": reports, "full_report": full_report_text}
-    return reports
-
-# Funksioni për krijimin e tastierës inline
-def create_inline_keyboard(query_id, page_id, count_page):
-    markup = InlineKeyboardMarkup()
-    buttons = []
-    if count_page > 1:
-        if page_id > 0:
-            buttons.append(InlineKeyboardButton("⬅️", callback_data=f"/page {query_id} {page_id - 1}"))
-        buttons.append(InlineKeyboardButton(f"{page_id + 1}/{count_page}", callback_data="ignore"))
-        if page_id < count_page - 1:
-            buttons.append(InlineKeyboardButton("➡️", callback_data=f"/page {query_id} {page_id + 1}"))
-    buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"/download {query_id}"))
-    markup.row(*buttons)
-    return markup
-
-bot = telebot.TeleBot(bot_token)
-
-# Print startup message
-print(f"\n{'='*50}")
-print(f"Bot started successfully!")
-print(f"Bot username: @{bot.get_me().username}")
-print(f"Configuration:")
-print(f" - API URL: {url}")
-print(f" - Query limit: {limit}")
-print(f" - Language: {lang}")
-print(f"{'='*50}\n")
+def format_database_html(entry):
+    html = f"<h3>🔗{entry['db']}</h3><p>{entry['info']}</p><table class='table table-bordered table-striped'>"
+    for row in entry['data']:
+        for k, v in row.items():
+            html += f"<tr><th>{k}</th><td>{v}</td></tr>"
+        html += "<tr><td colspan='2'><hr></td></tr>"
+    html += "</table>"
+    return html
 
 @bot.message_handler(commands=["start"])
-def send_welcome(message):
-    bot.reply_to(message, "🔍 Hi! Send me an email, IP, or URL to search data breaches.")
+def start(message):
+    bot.reply_to(message, "Send the email or domain to search breaches.")
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    query_id = randint(0, 9999999)
-    reports = generate_report(message.text, query_id)
+@bot.message_handler(func=lambda m: True)
+def search(message):
+    query_id = randint(10000, 99999)
+    bot.send_chat_action(message.chat.id, 'typing')
+    grouped, leaks = generate_full_report(message.text, query_id)
 
-    markup = create_inline_keyboard(query_id, 0, len(reports))
-    bot.send_message(message.chat.id, reports[0][:3500], parse_mode="html", reply_markup=markup)
+    summary = f"🔎Request: {message.text}\n🔬Subqueries executed: 1\n📁Results: {'FOUND' if leaks else 'NOT FOUND'}\n💦Leaks: {leaks}\n\n🪞Problems? @KubaneZii"
+    bot.send_message(message.chat.id, summary)
+
+    if not grouped:
+        return
+
+    cache_reports[str(query_id)]["grouped"] = grouped
+    cache_reports[str(query_id)]["index"] = 0
+
+    show_database(message.chat.id, query_id, 0)
+
+def show_database(chat_id, query_id, index, message_id=None):
+    entry = cache_reports[str(query_id)]["grouped"][index]
+    text = format_database_text(entry)
+
+    markup = InlineKeyboardMarkup()
+    if index > 0:
+        markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"/page {query_id} {index - 1}"))
+    if index < len(cache_reports[str(query_id)]["grouped"]) - 1:
+        markup.add(InlineKeyboardButton("Next ➡️", callback_data=f"/page {query_id} {index + 1}"))
+    markup.add(InlineKeyboardButton("📥 Download Full Report", callback_data=f"/download_full {query_id}"))
+
+    if message_id:
+        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_query(call: CallbackQuery):
-    try:
-        if call.data == "ignore":
-            bot.answer_callback_query(call.id, cache_time=1)
-            return
+def callback(call):
+    if call.data.startswith("/page"):
+        _, query_id, index = call.data.split()
+        show_database(call.message.chat.id, query_id, int(index), call.message.message_id)
 
-        if call.data.startswith("/page "):
-            _, query_id, page_id = call.data.split()
+    if call.data.startswith("/download_full"):
+        _, query_id = call.data.split()
+        full_html = ""
+        for entry in cache_reports[str(query_id)]["grouped"]:
+            full_html += format_database_html(entry)
 
-            if query_id not in cash_reports:
-                bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True, cache_time=1)
-                return
+        html_output = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset='UTF-8'><title>Full Leak Report</title>
+<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css'>
+<style>body {{ background-color: #f8f9fa; }} h3 {{ color: #0d6efd; }} table {{ background: #fff; }}</style>
+</head>
+<body class='container'>
+{static_html_data}
+{full_html}
+</body></html>"""
+        file_path = f"leak_full_{query_id}.html"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html_output)
+        with open(file_path, "rb") as f:
+            bot.send_document(call.message.chat.id, f)
 
-            reports = cash_reports[query_id]["pages"]
-            page_id = int(page_id)
-            markup = create_inline_keyboard(query_id, page_id, len(reports))
-
-            try:
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=reports[page_id][:3500],
-                    parse_mode="html",
-                    reply_markup=markup
-                )
-                bot.answer_callback_query(call.id, cache_time=1)
-            except telebot.apihelper.ApiTelegramException as e:
-                if "message is not modified" in str(e).lower():
-                    bot.answer_callback_query(call.id, cache_time=1)
-                else:
-                    raise
-
-        if call.data.startswith("/download "):
-            query_id = call.data.split()[1]
-
-            if query_id not in cash_reports:
-                bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True, cache_time=1)
-                return
-
-            full_report = cash_reports[query_id]["full_report"]
-            import tempfile
-            import os
-
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt') as temp_file:
-                temp_file.write(full_report)
-                temp_path = temp_file.name
-
-            try:
-                with open(temp_path, "rb") as file:
-                    bot.send_document(call.message.chat.id, file)
-                bot.answer_callback_query(call.id, cache_time=1)
-            finally:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-
-    except Exception as e:
-        print(f"Error in callback_query: {e}")
-        try:
-            bot.answer_callback_query(call.id, "⚠️ An error occurred.", show_alert=True, cache_time=1)
-        except:
-            pass
-
-if __name__ == "__main__":
-    from flask import Flask, request
-    import threading
-    import atexit
-    
-    app = Flask(__name__)
-    shutdown_event = threading.Event()
-    bot_thread = None
-    
-    @app.route('/')
-    def home():
-        return 'Bot is running!'
-    
-    def cleanup():
-        print("\nCleaning up...")
-        if bot_thread and bot_thread.is_alive():
-            shutdown_event.set()
-            bot.stop_polling()
-            bot_thread.join(timeout=5)
-    
-    def run_bot():
-        try:
-            bot.remove_webhook()
-        except Exception as e:
-            print(f"Error removing webhook: {e}")
-        
-        while not shutdown_event.is_set():
-            try:
-                bot.polling(timeout=60, non_stop=True)
-            except Exception as e:
-                if not shutdown_event.is_set():
-                    print(f"Bot polling error: {e}")
-                    if "Conflict: terminated by other getUpdates request" in str(e):
-                        print("Detected multiple bot instances, waiting before retry...")
-                        time.sleep(10)
-                    continue
-                break
-    
-    def signal_handler(signum, frame):
-        print("\nShutting down gracefully...")
-        cleanup()
-        func = request.environ.get('werkzeug.server.shutdown')
-        if func is not None:
-            func()
-        sys.exit(0)
-    
-    # Register cleanup handlers
-    atexit.register(cleanup)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Start bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+bot.polling()

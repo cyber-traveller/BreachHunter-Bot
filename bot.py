@@ -102,52 +102,87 @@ def handle_message(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call: CallbackQuery):
-    if call.data == "ignore":
-        bot.answer_callback_query(call.id)
-        return
-
-    if call.data.startswith("/page "):
-        _, query_id, page_id = call.data.split()
-
-        if query_id not in cash_reports:
-            bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True)
+    try:
+        if call.data == "ignore":
+            bot.answer_callback_query(call.id, cache_time=1)
             return
 
-        reports = cash_reports[query_id]["pages"]
-        page_id = int(page_id)
-        markup = create_inline_keyboard(query_id, page_id, len(reports))
+        if call.data.startswith("/page "):
+            _, query_id, page_id = call.data.split()
 
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=reports[page_id][:3500],
-            parse_mode="html",
-            reply_markup=markup
-        )
+            if query_id not in cash_reports:
+                bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True, cache_time=1)
+                return
 
-    if call.data.startswith("/download "):
-        query_id = call.data.split()[1]
+            reports = cash_reports[query_id]["pages"]
+            page_id = int(page_id)
+            markup = create_inline_keyboard(query_id, page_id, len(reports))
 
-        if query_id not in cash_reports:
-            bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True)
-            return
+            try:
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text=reports[page_id][:3500],
+                    parse_mode="html",
+                    reply_markup=markup
+                )
+                bot.answer_callback_query(call.id, cache_time=1)
+            except telebot.apihelper.ApiTelegramException as e:
+                if "message is not modified" in str(e).lower():
+                    bot.answer_callback_query(call.id, cache_time=1)
+                else:
+                    raise
 
-        full_report = cash_reports[query_id]["full_report"]
-        import tempfile
-        import os
+        if call.data.startswith("/download "):
+            query_id = call.data.split()[1]
 
-        # Create a temporary file that will be automatically cleaned up
-        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt') as temp_file:
-            temp_file.write(full_report)
-            temp_path = temp_file.name
+            if query_id not in cash_reports:
+                bot.answer_callback_query(call.id, "⚠️ Results expired.", show_alert=True, cache_time=1)
+                return
 
+            full_report = cash_reports[query_id]["full_report"]
+            import tempfile
+            import os
+
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt') as temp_file:
+                temp_file.write(full_report)
+                temp_path = temp_file.name
+
+            try:
+                with open(temp_path, "rb") as file:
+                    bot.send_document(call.message.chat.id, file)
+                bot.answer_callback_query(call.id, cache_time=1)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"Error in callback_query: {e}")
         try:
-            with open(temp_path, "rb") as file:
-                bot.send_document(call.message.chat.id, file)
-        finally:
-            # Clean up the temporary file
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            bot.answer_callback_query(call.id, "⚠️ An error occurred.", show_alert=True, cache_time=1)
+        except:
+            pass
 
 if __name__ == "__main__":
-    bot.polling()
+    from flask import Flask
+    import threading
+    
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return 'Bot is running!'
+    
+    def run_bot():
+        while True:
+            try:
+                bot.polling(timeout=60)
+            except Exception as e:
+                print(f"Bot polling error: {e}")
+                continue
+    
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.start()
+    
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)

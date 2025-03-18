@@ -5,6 +5,8 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from random import randint
 from dotenv import load_dotenv
 import html
+import signal
+import sys
 
 # Load environment variables
 load_dotenv()
@@ -164,22 +166,60 @@ def callback_query(call: CallbackQuery):
             pass
 
 if __name__ == "__main__":
-    from flask import Flask
+    from flask import Flask, request
     import threading
+    import atexit
     
     app = Flask(__name__)
+    shutdown_event = threading.Event()
+    bot_thread = None
     
     @app.route('/')
     def home():
         return 'Bot is running!'
     
+    def cleanup():
+        print("\nCleaning up...")
+        if bot_thread and bot_thread.is_alive():
+            shutdown_event.set()
+            bot.stop_polling()
+            bot_thread.join(timeout=5)
+    
     def run_bot():
-        while True:
+        try:
+            bot.remove_webhook()
+        except Exception as e:
+            print(f"Error removing webhook: {e}")
+        
+        while not shutdown_event.is_set():
             try:
-                bot.polling(timeout=60)
+                bot.polling(timeout=60, non_stop=True)
             except Exception as e:
-                print(f"Bot polling error: {e}")
-                continue
+                if not shutdown_event.is_set():
+                    print(f"Bot polling error: {e}")
+                    if "Conflict: terminated by other getUpdates request" in str(e):
+                        print("Detected multiple bot instances, waiting before retry...")
+                        time.sleep(10)
+                    continue
+                break
+    
+    def signal_handler(signum, frame):
+        print("\nShutting down gracefully...")
+        cleanup()
+        func = request.environ.get('werkzeug.server.shutdown')
+        if func is not None:
+            func()
+        sys.exit(0)
+    
+    # Register cleanup handlers
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Start bot in a separate thread
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
     
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.start()
